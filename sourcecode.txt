@@ -1,0 +1,959 @@
+Lua Script
+
+local CONFIG = {
+    TARGET_SCORE = 100,
+    ROUND_TIME = 600,
+    RESPAWN_DELAY = 3
+}
+
+local HILL_AREA = {
+    min_x = -1556, max_x = 1484,
+    min_y = -1841, max_y = 1185,
+    min_z = 3800,  max_z = 3950
+}
+
+local SPAWN_POINTS = {
+    red = {
+        "C003C7FA-4C55-6DF6-9C2F-5C9F90FF4389",
+        "3ACDBF41-4A3F-AB3C-D232-B99F3725634D",
+        "C67B8ABD-4DF1-FF8E-97C2-85A03A24F618",
+        "1DAA59BB-4B8F-F035-676E-86BA86760C7A",
+        "AE04B837-4613-3844-B335-F69CF95162A3"
+    },
+    blue = {
+        "6B9BD49A-43F9-BE1B-CA16-17B5E9F28996",
+        "CDE25B30-4F23-3840-6958-03989E84039D",
+        "8E4187EB-4AEF-6D0F-E7B8-AA9E5F3A75D3",
+        "A60431EE-488F-C646-92E5-2C86EB1F5A9E",
+        "CD221B74-4B59-DB91-B6C4-41A180A0E4B6"
+    }
+}
+
+local WEAPONS = {
+    shotgun     = { name = "Shotgun",           id = 39,  ammo = 300 },
+    smg         = { name = "Submachine Gun",    id = 79,  ammo = 300 },
+    lmg         = { name = "Light Machine Gun", id = 257, ammo = 300 },
+    autopistol  = { name = "Auto Pistol",       id = 215, ammo = 300 },
+    sniper      = { name = "Sniper Rifle",      id = 512, ammo = 300 },
+    semipistol  = { name = "Semi-Auto Pistol",  id = 45,  ammo = 300 },
+    machete     = { name = "Machete",           id = 274, ammo = 0 }
+}
+
+local state = {
+    round_started = false,
+    time_left = CONFIG.ROUND_TIME,
+    red_score = 0,
+    blue_score = 0,
+    game_over = false,
+    hill_occupants = { red = 0, blue = 0 },
+    status = "gray",
+    last_hud_status = ""
+}
+
+local players_data = {}
+
+local HUD_CSS = [[
+.hud-bar {
+    position: fixed;
+    top: 60px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-family: sans-serif;
+    font-weight: bold;
+    user-select: none;
+}
+.team-box {
+    padding: 10px 24px;
+    border-radius: 8px;
+    color: #ffffff;
+    font-size: 20px;
+    min-width: 140px;
+    text-align: center;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+.team-red { background-color: #d63031; }
+.team-blue { background-color: #0984e3; }
+.center-timer {
+    padding: 12px 28px;
+    border-radius: 10px;
+    font-size: 22px;
+    min-width: 130px;
+    text-align: center;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.5);
+    color: #ffffff;
+    transition: background-color 0.3s ease, color 0.3s ease;
+}
+.bg-gray { background-color: #636e72; }
+.bg-red { background-color: #d63031; }
+.bg-blue { background-color: #0984e3; }
+.bg-yellow { background-color: #f1c40f; color: #2d3436; }
+.hud-corner-actions {
+    position: fixed;
+    top: 24px;
+    right: 24px;
+    display: flex;
+    gap: 8px;
+    z-index: 100;
+}
+.hud-btn {
+    padding: 8px 14px;
+    background: rgba(20, 24, 33, 0.85);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 6px;
+    color: #f1f2f6;
+    font-family: sans-serif;
+    font-size: 13px;
+    font-weight: bold;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+    letter-spacing: 0.5px;
+}
+]]
+
+local function get_hud_html(status_color)
+    local cls = "bg-" .. (status_color or "gray")
+    return string.format([[
+<div class="hud-bar">
+    <div id="red_score" class="team-box team-red">RED: %d</div>
+    <div id="center_box" class="center-timer %s">10:00</div>
+    <div id="blue_score" class="team-box team-blue">BLUE: %d</div>
+</div>
+<div class="hud-corner-actions">
+    <button class="hud-btn" action="open_armory">SHOP</button>
+    <button class="hud-btn" action="open_scoreboard">SCORE</button>
+</div>
+]], state.red_score, cls, state.blue_score)
+end
+
+local KILLER_CSS = [[
+.killer-card {
+    position: fixed;
+    bottom: 80px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(14, 18, 26, 0.95);
+    border: 2px solid #e74c3c;
+    border-radius: 12px;
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    color: #ffffff;
+    font-family: sans-serif;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.7);
+    min-width: 340px;
+    user-select: none;
+}
+.killer-avatar {
+    width: 64px;
+    height: 64px;
+    border-radius: 8px;
+    object-fit: cover;
+    background: rgba(255, 255, 255, 0.1);
+    border: 2px solid #e74c3c;
+    display: inline-block;
+    flex-shrink: 0;
+}
+.killer-details {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 4px;
+    flex: 1;
+    overflow: hidden;
+}
+.killer-label {
+    font-size: 11px;
+    font-weight: 800;
+    color: #e74c3c;
+    letter-spacing: 1px;
+}
+.killer-name {
+    font-size: 18px;
+    font-weight: bold;
+    color: #ffffff;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.killer-weapon {
+    font-size: 14px;
+    color: #a4b0be;
+    font-weight: 500;
+}
+]]
+
+local function show_killer_card(victim, killer)
+    local k_name = "SUICIDE / ENVIRONMENT"
+    local weapon_name = "-"
+    local has_killer_player = false
+
+    if killer ~= -1 and killer ~= victim then
+        local k_info = game.player(killer)
+        k_name = (k_info and k_info.name) or ("Player " .. tostring(killer))
+        local k_data = players_data[killer]
+        local k_weapon_key = (k_data and k_data.last_weapon) or "semipistol"
+        weapon_name = (WEAPONS[k_weapon_key] and WEAPONS[k_weapon_key].name) or "Semi-Auto Pistol"
+        has_killer_player = true
+    end
+
+    local html = string.format([[
+<div class="killer-card">
+    <img id="killer_avatar" class="killer-avatar"/>
+    <div class="killer-details">
+        <div class="killer-label">KILLED BY</div>
+        <div id="killer_name" class="killer-name">%s</div>
+        <div id="killer_weapon" class="killer-weapon">%s</div>
+    </div>
+</div>
+]], k_name, weapon_name)
+
+    ui.show(victim, "killer_info", html, KILLER_CSS, false)
+
+    if has_killer_player then
+        ui.set_avatar(victim, "killer_info", "killer_avatar", killer)
+    end
+end
+
+local function is_in_hill(pos)
+    if not pos then return false end
+    return pos.x >= HILL_AREA.min_x and pos.x <= HILL_AREA.max_x and
+           pos.y >= HILL_AREA.min_y and pos.y <= HILL_AREA.max_y and
+           pos.z >= HILL_AREA.min_z and pos.z <= HILL_AREA.max_z
+end
+
+local function get_random_spawn(team)
+    local list = SPAWN_POINTS[team] or SPAWN_POINTS.red
+    return list[math.random(1, #list)]
+end
+
+local function format_time(seconds)
+    local m = math.floor(seconds / 60)
+    local s = seconds % 60
+    return string.format("%02d:%02d", m, s)
+end
+
+local function update_all_huds()
+    local red_str = string.format("RED: %d", state.red_score)
+    local blue_str = string.format("BLUE: %d", state.blue_score)
+    local base_time = format_time(state.time_left)
+
+    local status_changed = (state.status ~= state.last_hud_status)
+
+    for _, pid in ipairs(game.players()) do
+        if status_changed then
+            ui.show(pid, "koth_hud", get_hud_html(state.status), HUD_CSS, false)
+        end
+
+        ui.set_text(pid, "koth_hud", "red_score", red_str)
+        ui.set_text(pid, "koth_hud", "blue_score", blue_str)
+        ui.set_text(pid, "koth_hud", "center_box", base_time)
+    end
+
+    if status_changed then
+        state.last_hud_status = state.status
+    end
+end
+
+local function give_loadout(player_id, weapon_key)
+    local w = WEAPONS[weapon_key] or WEAPONS.semipistol
+
+    if players_data[player_id] then
+        players_data[player_id].last_weapon = weapon_key
+    end
+
+    game.clear_inventory(player_id, false)
+    game.give_item(player_id, w.id, 1)
+    game.equip_item(player_id, 1)
+
+    if w.ammo > 0 then
+        game.set_ammo(player_id, w.ammo, false)
+    end
+end
+
+local function assign_team(player_id)
+    local red_count = 0
+    local blue_count = 0
+
+    for id, p in pairs(players_data) do
+        if id ~= player_id then
+            if p.team == "red" then red_count = red_count + 1
+            elseif p.team == "blue" then blue_count = blue_count + 1 end
+        end
+    end
+
+    local team = (red_count <= blue_count) and "red" or "blue"
+    players_data[player_id] = players_data[player_id] or { kills = 0, deaths = 0, last_weapon = "semipistol", is_dead = false }
+    players_data[player_id].team = team
+    players_data[player_id].is_dead = false
+    game.set_team(player_id, team)
+
+    if team == "red" then
+        game.set_outline(player_id, 1.0, 0.2, 0.2)
+    else
+        game.set_outline(player_id, 0.2, 0.5, 1.0)
+    end
+
+    return team
+end
+
+local function open_scoreboard(player_id)
+    ui.open(player_id, "scoreboard", true)
+
+    ui.set_text(player_id, "scoreboard", "sb_red_title", string.format("RED TEAM (%d)", state.red_score))
+    ui.set_text(player_id, "scoreboard", "sb_blue_title", string.format("BLUE TEAM (%d)", state.blue_score))
+
+    local red_idx = 1
+    local blue_idx = 1
+
+    for _, pid in ipairs(game.players()) do
+        local data = players_data[pid] or { team = "red", kills = 0, deaths = 0 }
+        local p_info = game.player(pid)
+        local p_name = (p_info and p_info.name) or ("Player " .. tostring(pid))
+        local name_str = string.format("%s (%dK / %dD)", p_name, data.kills, data.deaths)
+
+        if data.team == "red" and red_idx <= 6 then
+            ui.set_text(player_id, "scoreboard", "sb_r_txt_" .. tostring(red_idx), name_str)
+            ui.set_avatar(player_id, "scoreboard", "sb_r_img_" .. tostring(red_idx), pid)
+            red_idx = red_idx + 1
+        elseif data.team == "blue" and blue_idx <= 6 then
+            ui.set_text(player_id, "scoreboard", "sb_b_txt_" .. tostring(blue_idx), name_str)
+            ui.set_avatar(player_id, "scoreboard", "sb_b_img_" .. tostring(blue_idx), pid)
+            blue_idx = blue_idx + 1
+        end
+    end
+
+    for i = red_idx, 6 do
+        ui.set_text(player_id, "scoreboard", "sb_r_txt_" .. tostring(i), "-")
+    end
+    for i = blue_idx, 6 do
+        ui.set_text(player_id, "scoreboard", "sb_b_txt_" .. tostring(i), "-")
+    end
+end
+
+local function update_hill()
+    local red_count = 0
+    local blue_count = 0
+
+    for _, pid in ipairs(game.players()) do
+        local data = players_data[pid]
+        if data and not data.is_dead then
+            local pos = game.position(pid)
+            if pos and is_in_hill(pos) then
+                if data.team == "red" then red_count = red_count + 1
+                elseif data.team == "blue" then blue_count = blue_count + 1 end
+            end
+        end
+    end
+
+    state.hill_occupants.red = red_count
+    state.hill_occupants.blue = blue_count
+
+    if red_count > 0 and blue_count > 0 then
+        state.status = "yellow"
+    elseif red_count > 0 and blue_count == 0 then
+        state.status = "red"
+        state.red_score = state.red_score + 1
+    elseif blue_count > 0 and red_count == 0 then
+        state.status = "blue"
+        state.blue_score = state.blue_score + 1
+    else
+        state.status = "gray"
+    end
+end
+
+local function restart_match()
+    state.red_score = 0
+    state.blue_score = 0
+    state.time_left = CONFIG.ROUND_TIME
+    state.game_over = false
+    state.status = "gray"
+    state.last_hud_status = ""
+
+    for _, pid in ipairs(game.players()) do
+        ui.close(pid, "scoreboard")
+
+        if players_data[pid] then
+            players_data[pid].kills = 0
+            players_data[pid].deaths = 0
+            players_data[pid].is_dead = false
+        end
+
+        local team = (players_data[pid] and players_data[pid].team) or "red"
+        local spawn_guid = get_random_spawn(team)
+        game.teleport(pid, spawn_guid)
+        game.after(0.1, "force_tp_" .. tostring(pid) .. "_" .. spawn_guid)
+
+        local weapon = (players_data[pid] and players_data[pid].last_weapon) or "semipistol"
+        give_loadout(pid, weapon)
+        game.set_invulnerable(pid, true)
+        game.after(CONFIG.RESPAWN_DELAY, "remove_invuln_" .. tostring(pid))
+    end
+
+    game.set_phase("LIVE", CONFIG.ROUND_TIME)
+    update_all_huds()
+    game.after(1, "main_tick")
+end
+
+local function check_game_over()
+    if state.game_over then return true end
+
+    local winner = nil
+    if state.red_score >= CONFIG.TARGET_SCORE then
+        winner = "RED TEAM WINS!"
+    elseif state.blue_score >= CONFIG.TARGET_SCORE then
+        winner = "BLUE TEAM WINS!"
+    elseif state.time_left <= 0 then
+        if state.red_score > state.blue_score then
+            winner = "TIME OVER - RED TEAM WINS!"
+        elseif state.blue_score > state.red_score then
+            winner = "TIME OVER - BLUE TEAM WINS!"
+        else
+            winner = "TIME OVER - DRAW!"
+        end
+    end
+
+    if winner then
+        state.game_over = true
+        game.set_phase(winner, 0)
+
+        for _, pid in ipairs(game.players()) do
+            open_scoreboard(pid)
+        end
+
+        game.after(5, "end_game_delay")
+        return true
+    end
+    return false
+end
+
+local function game_tick()
+    if state.game_over then return end
+
+    if state.round_started then
+        state.time_left = math.max(0, state.time_left - 1)
+        update_hill()
+    end
+    update_all_huds()
+
+    if not check_game_over() then
+        game.after(1, "main_tick")
+    end
+end
+
+function on_start()
+    game.enable_rounds(true)
+    game.set_friendly_fire(false)
+    game.after(1, "main_tick")
+end
+
+function on_timer(label)
+    if label == "main_tick" then
+        game_tick()
+    elseif label == "end_game_delay" then
+        restart_match()
+    elseif string.sub(label, 1, 8) == "respawn_" then
+        local pid_str = string.sub(label, 9)
+        local pid = tonumber(pid_str)
+        if pid and players_data[pid] then
+            local team = players_data[pid].team or "red"
+            local spawn_guid = get_random_spawn(team)
+            game.spawn_player(pid, spawn_guid)
+            game.after(0.1, "force_tp_" .. tostring(pid) .. "_" .. spawn_guid)
+        end
+    elseif string.sub(label, 1, 9) == "force_tp_" then
+        local rest = string.sub(label, 10)
+        local underscore_pos = string.find(rest, "_")
+        if underscore_pos then
+            local pid = tonumber(string.sub(rest, 1, underscore_pos - 1))
+            local spawn_guid = string.sub(rest, underscore_pos + 1)
+            if pid and spawn_guid and spawn_guid ~= "" then
+                game.teleport(pid, spawn_guid)
+            end
+        end
+    elseif string.sub(label, 1, 14) == "remove_invuln_" then
+        local pid_str = string.sub(label, 15)
+        local pid = tonumber(pid_str)
+        if pid then
+            game.set_invulnerable(pid, false)
+        end
+    end
+end
+
+function on_player_event(event, player_id)
+    if event == "joined" then
+        players_data[player_id] = { kills = 0, deaths = 0, last_weapon = "semipistol", is_dead = false }
+        local team = assign_team(player_id)
+        local spawn_guid = get_random_spawn(team)
+        
+        ui.show(player_id, "koth_hud", get_hud_html(state.status), HUD_CSS, false)
+        game.set_respawn(player_id, true, spawn_guid, 0)
+        game.spawn_player(player_id, spawn_guid)
+        game.after(0.1, "force_tp_" .. tostring(player_id) .. "_" .. spawn_guid)
+
+        if not state.round_started then
+            state.round_started = true
+            game.set_phase("LIVE", CONFIG.ROUND_TIME)
+        end
+
+    elseif event == "spawned" then
+        local data = players_data[player_id]
+        if not data then
+            players_data[player_id] = { kills = 0, deaths = 0, last_weapon = "semipistol", is_dead = false }
+            data = players_data[player_id]
+        end
+        data.is_dead = false
+
+        local team = data.team or assign_team(player_id)
+        local spawn_guid = get_random_spawn(team)
+
+        game.teleport(player_id, spawn_guid)
+        game.after(0.1, "force_tp_" .. tostring(player_id) .. "_" .. spawn_guid)
+
+        game.set_team(player_id, team)
+        if team == "red" then
+            game.set_outline(player_id, 1.0, 0.2, 0.2)
+        else
+            game.set_outline(player_id, 0.2, 0.5, 1.0)
+        end
+
+        local weapon = data.last_weapon or "semipistol"
+        give_loadout(player_id, weapon)
+        game.set_invulnerable(player_id, true)
+        game.after(CONFIG.RESPAWN_DELAY, "remove_invuln_" .. tostring(player_id))
+
+        ui.close(player_id, "killer_info")
+
+        local next_spawn = get_random_spawn(team)
+        game.set_respawn(player_id, true, next_spawn, CONFIG.RESPAWN_DELAY)
+
+    elseif event == "left" then
+        players_data[player_id] = nil
+    end
+end
+
+function on_kill(victim, killer, time)
+    if players_data[victim] then
+        players_data[victim].deaths = players_data[victim].deaths + 1
+        players_data[victim].is_dead = true
+
+        show_killer_card(victim, killer)
+
+        game.after(CONFIG.RESPAWN_DELAY, "respawn_" .. tostring(victim))
+    end
+
+    if killer ~= -1 and players_data[killer] then
+        players_data[killer].kills = players_data[killer].kills + 1
+        game.add_score(killer, 10)
+    end
+end
+
+function on_chat(player_id, message, channel)
+    local msg = string.lower(message)
+    msg = string.match(msg, "^%s*(.-)%s*$") or msg
+
+    if msg == "!tab" or msg == "tab" or msg == "!score" or msg == "score" or msg == "/tab" or msg == "/score" then
+        open_scoreboard(player_id)
+    elseif msg == "!buy" or msg == "buy" or msg == "/buy" or msg == "!shop" or msg == "shop" or msg == "!armory" or msg == "armory" or msg == "/shop" or msg == "/armory" then
+        ui.open(player_id, "weapon_shop", true)
+    end
+end
+
+function on_ui_action(player_id, panel_name, action)
+    if panel_name == "koth_hud" then
+        if action == "open_armory" then
+            ui.open(player_id, "weapon_shop", true)
+        elseif action == "open_scoreboard" then
+            open_scoreboard(player_id)
+        end
+    elseif panel_name == "weapon_shop" then
+        if action == "select_shotgun" then
+            give_loadout(player_id, "shotgun")
+            ui.close(player_id, "weapon_shop")
+        elseif action == "select_smg" then
+            give_loadout(player_id, "smg")
+            ui.close(player_id, "weapon_shop")
+        elseif action == "select_lmg" then
+            give_loadout(player_id, "lmg")
+            ui.close(player_id, "weapon_shop")
+        elseif action == "select_autopistol" then
+            give_loadout(player_id, "autopistol")
+            ui.close(player_id, "weapon_shop")
+        elseif action == "select_sniper" then
+            give_loadout(player_id, "sniper")
+            ui.close(player_id, "weapon_shop")
+        elseif action == "select_semipistol" then
+            give_loadout(player_id, "semipistol")
+            ui.close(player_id, "weapon_shop")
+        elseif action == "select_machete" then
+            give_loadout(player_id, "machete")
+            ui.close(player_id, "weapon_shop")
+        elseif action == "close_shop" then
+            ui.close(player_id, "weapon_shop")
+        end
+    elseif panel_name == "scoreboard" then
+        if action == "close_scoreboard" then
+            ui.close(player_id, "scoreboard")
+        end
+    end
+end
+
+
+koth_hud
+1. html
+<div class="hud-bar">
+    <div id="red_score" class="team-box team-red">RED: 0</div>
+    <div id="center_box" class="center-timer bg-gray">10:00</div>
+    <div id="blue_score" class="team-box team-blue">BLUE: 0</div>
+</div>
+
+<div class="hud-corner-actions">
+    <button class="hud-btn" action="open_armory">SHOP</button>
+    <button class="hud-btn" action="open_scoreboard">SCORE</button>
+</div>
+
+2. css
+.hud-bar {
+    position: fixed;
+    top: 60px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-family: sans-serif;
+    font-weight: bold;
+    user-select: none;
+}
+.team-box {
+    padding: 10px 24px;
+    border-radius: 8px;
+    color: #ffffff;
+    font-size: 20px;
+    min-width: 140px;
+    text-align: center;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+.team-red {
+    background-color: #d63031;
+}
+.team-blue {
+    background-color: #0984e3;
+}
+.center-timer {
+    padding: 12px 28px;
+    border-radius: 10px;
+    color: #ffffff;
+    font-size: 22px;
+    min-width: 130px;
+    text-align: center;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.5);
+    transition: background-color 0.3s ease, color 0.3s ease;
+}
+.bg-gray {
+    background-color: #636e72;
+}
+.bg-red {
+    background-color: #d63031;
+}
+.bg-blue {
+    background-color: #0984e3;
+}
+.bg-yellow {
+    background-color: #f1c40f;
+    color: #2d3436;
+}
+
+.hud-corner-actions {
+    position: fixed;
+    top: 24px;
+    right: 24px;
+    display: flex;
+    gap: 8px;
+    z-index: 100;
+}
+.hud-btn {
+    padding: 8px 14px;
+    background: rgba(20, 24, 33, 0.85);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 6px;
+    color: #f1f2f6;
+    font-family: sans-serif;
+    font-size: 13px;
+    font-weight: bold;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+    letter-spacing: 0.5px;
+}
+.hud-btn:hover {
+    background: rgba(45, 52, 71, 0.95);
+    border-color: #0984e3;
+    color: #ffffff;
+}
+
+weapon_shop
+1. html
+<div class="shop-modal">
+    <div class="shop-title">Armory (Select Weapon)</div>
+    <button class="weapon-btn" action="select_shotgun">Shotgun</button>
+    <button class="weapon-btn" action="select_smg">Submachine Gun</button>
+    <button class="weapon-btn" action="select_lmg">Light Machine Gun</button>
+    <button class="weapon-btn" action="select_autopistol">Auto Pistol</button>
+    <button class="weapon-btn" action="select_sniper">Sniper Rifle</button>
+    <button class="weapon-btn" action="select_semipistol">Semi-Auto Pistol</button>
+    <button class="weapon-btn" action="select_machete">Machete</button>
+    <button class="close-btn" action="close_shop">Close</button>
+</div>
+2. css
+.shop-modal {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(25, 28, 36, 0.96);
+    border: 2px solid #4b6584;
+    border-radius: 12px;
+    padding: 24px;
+    width: 380px;
+    color: #ffffff;
+    font-family: sans-serif;
+}
+.shop-title {
+    font-size: 20px;
+    font-weight: bold;
+    margin-bottom: 16px;
+    text-align: center;
+    border-bottom: 1px solid #4b6584;
+    padding-bottom: 8px;
+}
+.weapon-btn {
+    width: 100%;
+    padding: 10px;
+    margin-bottom: 8px;
+    background: #2d3436;
+    color: #ffffff;
+    border: 1px solid #636e72;
+    border-radius: 6px;
+    font-size: 15px;
+    cursor: pointer;
+}
+.weapon-btn:hover {
+    background: #0984e3;
+    border-color: #74b9ff;
+}
+.close-btn {
+    width: 100%;
+    padding: 8px;
+    margin-top: 10px;
+    background: #d63031;
+    color: #ffffff;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+scoreboard
+1. html
+<div class="scoreboard-modal">
+    <div id="sb_header" class="sb-header">MATCH LEADERBOARD</div>
+    <div class="sb-teams-grid">
+        <div class="sb-team-col">
+            <div id="sb_red_title" class="sb-team-title-red">RED TEAM (0)</div>
+            <div class="sb-row"><img id="sb_r_img_1" class="sb-avatar"/><span id="sb_r_txt_1" class="sb-name">-</span></div>
+            <div class="sb-row"><img id="sb_r_img_2" class="sb-avatar"/><span id="sb_r_txt_2" class="sb-name">-</span></div>
+            <div class="sb-row"><img id="sb_r_img_3" class="sb-avatar"/><span id="sb_r_txt_3" class="sb-name">-</span></div>
+            <div class="sb-row"><img id="sb_r_img_4" class="sb-avatar"/><span id="sb_r_txt_4" class="sb-name">-</span></div>
+            <div class="sb-row"><img id="sb_r_img_5" class="sb-avatar"/><span id="sb_r_txt_5" class="sb-name">-</span></div>
+            <div class="sb-row"><img id="sb_r_img_6" class="sb-avatar"/><span id="sb_r_txt_6" class="sb-name">-</span></div>
+        </div>
+        <div class="sb-team-col">
+            <div id="sb_blue_title" class="sb-team-title-blue">BLUE TEAM (0)</div>
+            <div class="sb-row"><img id="sb_b_img_1" class="sb-avatar"/><span id="sb_b_txt_1" class="sb-name">-</span></div>
+            <div class="sb-row"><img id="sb_b_img_2" class="sb-avatar"/><span id="sb_b_txt_2" class="sb-name">-</span></div>
+            <div class="sb-row"><img id="sb_b_img_3" class="sb-avatar"/><span id="sb_b_txt_3" class="sb-name">-</span></div>
+            <div class="sb-row"><img id="sb_b_img_4" class="sb-avatar"/><span id="sb_b_txt_4" class="sb-name">-</span></div>
+            <div class="sb-row"><img id="sb_b_img_5" class="sb-avatar"/><span id="sb_b_txt_5" class="sb-name">-</span></div>
+            <div class="sb-row"><img id="sb_b_img_6" class="sb-avatar"/><span id="sb_b_txt_6" class="sb-name">-</span></div>
+        </div>
+    </div>
+    <button class="sb-close-btn" action="close_scoreboard">Close</button>
+</div>
+2. css
+.scoreboard-modal {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(14, 18, 26, 0.97);
+    border: 2px solid #4b6584;
+    border-radius: 14px;
+    padding: 30px;
+    width: 860px;
+    box-sizing: border-box;
+    overflow: hidden;
+    color: #ffffff;
+    font-family: sans-serif;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.7);
+}
+.sb-header {
+    text-align: center;
+    font-size: 26px;
+    font-weight: 900;
+    margin-bottom: 20px;
+    border-bottom: 2px solid rgba(75, 101, 132, 0.6);
+    padding-bottom: 12px;
+    box-sizing: border-box;
+    letter-spacing: 1px;
+}
+.sb-teams-grid {
+    display: flex;
+    gap: 20px;
+    width: 100%;
+    box-sizing: border-box;
+}
+.sb-team-col {
+    flex: 1;
+    background: rgba(26, 32, 44, 0.85);
+    border-radius: 10px;
+    padding: 16px;
+    box-sizing: border-box;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+}
+.sb-team-title-red {
+    font-size: 18px;
+    font-weight: bold;
+    color: #ff5252;
+    border-bottom: 2px solid #ff5252;
+    padding-bottom: 8px;
+    margin-bottom: 12px;
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+}
+.sb-team-title-blue {
+    font-size: 18px;
+    font-weight: bold;
+    color: #40a9ff;
+    border-bottom: 2px solid #40a9ff;
+    padding-bottom: 8px;
+    margin-bottom: 12px;
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+}
+.sb-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 8px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    font-size: 15px;
+    min-height: 44px;
+    box-sizing: border-box;
+}
+.sb-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    object-fit: cover;
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    display: inline-block;
+    flex-shrink: 0;
+}
+.sb-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 600;
+}
+.sb-close-btn {
+    width: 100%;
+    padding: 12px;
+    margin-top: 22px;
+    background: #2d3436;
+    color: #ffffff;
+    border: 1px solid #636e72;
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: bold;
+    font-size: 15px;
+}
+.sb-close-btn:hover {
+    background: #d63031;
+    border-color: #d63031;
+}
+
+killer_info
+1. html
+<div class="killer-card">
+    <img id="killer_avatar" class="killer-avatar"/>
+    <div class="killer-details">
+        <div class="killer-label">KILLED BY</div>
+        <div id="killer_name" class="killer-name">EnemyPlayer</div>
+        <div id="killer_weapon" class="killer-weapon">Weapon Name</div>
+    </div>
+</div>
+2. css
+.killer-card {
+    position: fixed;
+    bottom: 80px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(14, 18, 26, 0.95);
+    border: 2px solid #e74c3c;
+    border-radius: 12px;
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    color: #ffffff;
+    font-family: sans-serif;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.7);
+    min-width: 340px;
+    user-select: none;
+}
+.killer-avatar {
+    width: 64px;
+    height: 64px;
+    border-radius: 8px;
+    object-fit: cover;
+    background: rgba(255, 255, 255, 0.1);
+    border: 2px solid #e74c3c;
+    display: inline-block;
+    flex-shrink: 0;
+}
+.killer-details {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 4px;
+    flex: 1;
+    overflow: hidden;
+}
+.killer-label {
+    font-size: 11px;
+    font-weight: 800;
+    color: #e74c3c;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+}
+.killer-name {
+    font-size: 20px;
+    font-weight: bold;
+    color: #ffffff;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.killer-weapon {
+    font-size: 14px;
+    font-weight: 600;
+    color: #f1c40f;
+}
+
